@@ -92,21 +92,3 @@ For a detailed explanation of demo results, see:
 ### Install dependencies
 ```bash
 pip install -r requirements.txt
-python engine.py --input your_data.csv
-streamlit run app.py
-Design Philosophy
-
-Key principles behind this project:
-
-Conservative, production-safe detection
-
-Minimal false positives
-
-Explainable and transparent outputs
-
-Clear separation of ingestion, validation, and analysis
-
-Readiness for integration into larger digital systems
-
-This project is intended to demonstrate engineering mindset and analytical
-approach rather than serve as a finished commercial product.
