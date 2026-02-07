@@ -271,16 +271,16 @@ class Profiler:
                 "rows": st["rows"],
                 "nulls": st["nulls"],
                 "unique_estimate": st["unique"].count(),
-                "top": st["top"],
+                "top": {str(k): _json_safe(v) for k, v in st["top"].items()},
             }
             rs = st["numeric"]
             if rs.n > 0:
                 o.update(
                     {
-                        "min": rs.min,
-                        "max": rs.max,
-                        "mean": rs.mean,
-                        "std": rs.std(),
+                        "min": _json_safe(rs.min),
+                        "max": _json_safe(rs.max),
+                        "mean": _json_safe(rs.mean),
+                        "std": _json_safe(rs.std()),
                     }
                 )
             out[str(c)] = o
@@ -395,7 +395,7 @@ class Engine:
             "rows_per_sec": int(total / max(time.time() - t0, 1e-6)),
             "profile": self.profiler.export(),
             "sample_anomalies": [
-                {k: _json_safe(v) for k, v in row.items()}
+                {str(k): _json_safe(v) for k, v in row.items()}
                 for row in self.samples
             ],
         }
