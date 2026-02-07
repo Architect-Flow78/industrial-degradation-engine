@@ -4,8 +4,6 @@ import json
 import pandas as pd
 import os
 
-from engine import Engine
-
 st.set_page_config(
     page_title="Industrial Data Quality Engine",
     layout="wide"
