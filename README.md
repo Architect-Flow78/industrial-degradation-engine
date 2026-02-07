@@ -1,117 +1,112 @@
-# Industrial Data Quality & Anomaly Detection Engine
+# Industrial Degradation Engine
+
+A production-oriented data quality and anomaly detection engine designed to
+demonstrate analytical rigor, systems thinking, and a structured engineering
+approach to complex datasets.
+
+This project was developed as a focused proof of concept in an industrial and
+business process context.
+
+---
 
 ## Overview
 
-This project is a **production-oriented data quality and anomaly detection engine** designed for high-throughput industrial data pipelines.  
-It targets environments where **data reliability, explainability, and operational stability** are critical, such as advanced manufacturing, automotive production, and industrial analytics.
+The engine processes structured datasets in a streaming manner, validates data
+quality, detects statistical and rule-based anomalies, and produces explainable,
+actionable outputs.
 
-The engine is optimized for **streaming and large-scale batch data**, with a strong focus on transparency and deterministic behavior rather than opaque black-box models.
+It is intentionally conservative and deterministic, prioritizing trust and
+robustness over noisy or exaggerated results.
 
 ---
 
 ## Core Capabilities
 
-### 1. Streaming Processing at Scale
-- Chunk-based ingestion for large files
-- Stable memory footprint
-- High throughput (rows/sec metric included)
-- Suitable for ETL, ingestion, and offline/near-real-time pipelines
+- Streaming ingestion of large datasets
+- Rule-based data validation
+- Robust statistical anomaly detection (MAD / z-score)
+- Explainable anomaly reasons
+- Column-level data profiling
+- Approximate distinct cardinality estimation
+- Performance and throughput metrics
+- CLI and interactive Streamlit interface
 
 ---
 
-### 2. Hybrid Anomaly Detection
+## Project Context and Relevance
 
-#### Rule-Based Validation
-- Column-level rules (`>`, `<`, `between`, `regex`, `null`, etc.)
-- Expression rules (`expr: "a > b * 1.2"`)
-- Severity levels (`error`, `warning`)
-- Fully explainable rule hits per row
+This project demonstrates an approach aligned with roles involving:
 
-#### Statistical Detection
-- Robust Median Absolute Deviation (MAD)
-- Automatic fallback to standard deviation when needed
-- Resistant to outliers and skewed distributions
-- Column-level anomaly attribution
+- Process analysis and optimization
+- Data-driven decision support
+- Digital systems and analytics
+- Cross-functional collaboration between business and technical teams
+- Reliability and explainability in operational environments
 
----
-
-### 3. Data Profiling & Health Monitoring
-- Null rate tracking
-- Approximate distinct cardinality (HyperLogLog-style)
-- Top frequent values
-- Streaming min / max / mean / standard deviation
-- Designed for schema drift and data contract monitoring
+Rather than forcing anomaly detection, the engine correctly identifies when
+datasets are statistically stable.  
+**Zero detected anomalies is a valid and correct outcome** for healthy data.
 
 ---
 
-### 4. Production-Grade Engineering
-- Deterministic results
-- SHA-256 input hashing for auditability
-- Chunk-level timing metrics
-- Sample anomaly extraction
-- Clean separation of valid vs anomalous data
-- JSON summary report for downstream systems
+## Intended Usage Scenarios
+
+The engine can be applied to:
+
+- Industrial and operational datasets
+- Procurement or supply chain data
+- Data quality gates before analytics or reporting
+- Process monitoring and early deviation detection
+- Support for continuous improvement initiatives
+
+The architecture is modular and adaptable to different business domains.
 
 ---
 
-### 5. Format & Pipeline Flexibility
-- Supports CSV, TXT, GZ, JSONL
-- Optional external schema definition
-- Optional external rule configuration
-- Output formats: CSV, JSONL, Parquet
-- Easily embeddable into existing data platforms
+## Demo
+
+An interactive demo is available via Streamlit.
+
+Users can upload datasets and immediately inspect results, statistics, and
+detected anomalies.
+
+### Supported input formats
+- CSV
+- TXT
+- GZ (compressed text)
+- JSON / JSONL
+
+Depending on the dataset characteristics:
+- Stable industrial data may produce **no anomalies**
+- Heterogeneous or business data may reveal statistical deviations
+
+Both outcomes are expected and indicate correct system behavior.
+
+For a detailed explanation of demo results, see:
+`demo/DEMO_INTERPRETATION.md`
 
 ---
 
-## Typical Use Cases
+## Running the Project
 
-- Sensor data quality validation
-- Manufacturing data ingestion control
-- Early anomaly filtering before ML pipelines
-- Feature health monitoring
-- Schema drift detection
-- ETL validation layer
-- Offline analysis and audit reporting
+### Install dependencies
+```bash
+pip install -r requirements.txt
+python engine.py --input your_data.csv
+streamlit run app.py
+Design Philosophy
 
----
+Key principles behind this project:
 
-## Design Philosophy
+Conservative, production-safe detection
 
-- **Explainability first**: every anomaly has a reason
-- **Engineering-driven**, not experimental AI
-- **Composable foundation** for ML, predictive maintenance, or advanced analytics
-- Built for environments where **trust in data is as important as accuracy**
+Minimal false positives
 
----
+Explainable and transparent outputs
 
-## Why This Matters
+Clear separation of ingestion, validation, and analysis
 
-In advanced manufacturing contexts, unreliable data leads to:
-- False alerts
-- Missed degradation signals
-- Reduced trust in analytics and AI systems
+Readiness for integration into larger digital systems
 
-This engine acts as a **data integrity and anomaly control layer**, ensuring that downstream analytics and decision systems operate on validated, explainable, and monitored data.
-
----
-
-## Technology Stack
-
-- Python
-- Pandas / NumPy
-- Streamlit (for demonstration and presentation)
-- Stateless, dependency-light core engine
-
----
-
-## Status
-
-- Production-ready core
-- Demonstration UI included
-- Designed for integration into industrial data platforms
-
----
-
-## Contact / Demo
-
-The Streamlit application included in this repository provides a live, interactive demonstration of the engine’s capabilities for evaluation and discussion.
+This project is intended to demonstrate engineering mindset and analytical
+approach rather than serve as a finished commercial product.
