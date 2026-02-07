@@ -52,6 +52,18 @@ def infer_type(series):
         return "string"
 
 
+def _json_safe(x):
+    if isinstance(x, (np.integer,)):
+        return int(x)
+    if isinstance(x, (np.floating,)):
+        return float(x)
+    if isinstance(x, (np.bool_,)):
+        return bool(x)
+    if pd.isna(x):
+        return None
+    return x
+
+
 # ============================================================
 # Operators
 # ============================================================
@@ -292,16 +304,8 @@ class Writer:
             good.to_parquet(f"{self.base}_clean/{self.i}.parquet")
             bad.to_parquet(f"{self.base}_anomalies/{self.i}.parquet")
         elif self.mode == "json":
-            good.to_json(
-                f"{self.base}_clean/{self.i}.jsonl",
-                orient="records",
-                lines=True,
-            )
-            bad.to_json(
-                f"{self.base}_anomalies/{self.i}.jsonl",
-                orient="records",
-                lines=True,
-            )
+            good.to_json(f"{self.base}_clean/{self.i}.jsonl", orient="records", lines=True)
+            bad.to_json(f"{self.base}_anomalies/{self.i}.jsonl", orient="records", lines=True)
         else:
             good.to_csv(f"{self.base}_clean/{self.i}.csv", index=False)
             bad.to_csv(f"{self.base}_anomalies/{self.i}.csv", index=False)
@@ -372,9 +376,7 @@ class Engine:
             bad_rows = chunk[mask]
 
             if len(self.samples) < 100:
-                self.samples.extend(
-                    bad_rows.head(100 - len(self.samples)).to_dict("records")
-                )
+                self.samples.extend(bad_rows.head(100 - len(self.samples)).to_dict("records"))
 
             writer.write(good, bad_rows)
             self.profiler.update(chunk.drop(columns="__error_reason"))
@@ -392,7 +394,10 @@ class Engine:
             "rows_anomalies": bad,
             "rows_per_sec": int(total / max(time.time() - t0, 1e-6)),
             "profile": self.profiler.export(),
-            "sample_anomalies": self.samples,
+            "sample_anomalies": [
+                {k: _json_safe(v) for k, v in row.items()}
+                for row in self.samples
+            ],
         }
 
         with open(os.path.splitext(path)[0] + "_summary.json", "w") as f:
