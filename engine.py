@@ -1,93 +1,421 @@
-print("ENGINE MODULE LOADED")
-import streamlit as st
-import tempfile
+#!/usr/bin/env python3
+
+import argparse
 import json
-import pandas as pd
 import os
+import gzip
+import hashlib
+import logging
+import time
+from datetime import datetime
+from typing import Dict, Callable, Any
 
-st.set_page_config(
-    page_title="Industrial Data Quality Engine",
-    layout="wide"
-)
+import pandas as pd
+import numpy as np
 
-st.title("Industrial Data Quality & Anomaly Detection")
+logging.basicConfig(level=logging.INFO)
 
-uploaded_file = st.file_uploader(
-    "Upload data file",
-    type=["csv", "txt", "gz", "json", "jsonl"]
-)
+# ============================================================
+# Utils
+# ============================================================
 
-schema_file = st.file_uploader(
-    "Optional schema (JSON)",
-    type=["json"]
-)
+def sha256_file(path, block=1 << 20):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(block), b""):
+            h.update(b)
+    return h.hexdigest()
 
-rules_file = st.file_uploader(
-    "Optional rules (JSON)",
-    type=["json"]
-)
 
-run = st.button("Run engine")
+def open_file(path):
+    if path.endswith(".gz"):
+        return gzip.open(path, "rt", encoding="utf-8", errors="replace")
+    return open(path, "r", encoding="utf-8", errors="replace")
 
-if uploaded_file and run:
-    with st.spinner("Processing..."):
-        tmp_data = tempfile.NamedTemporaryFile(delete=False)
-        tmp_data.write(uploaded_file.read())
-        tmp_data.close()
 
-        tmp_schema = None
-        tmp_rules = None
+def infer_type(series):
+    s = series.dropna().head(200)
+    try:
+        pd.to_numeric(s, downcast="integer")
+        return "int"
+    except Exception:
+        pass
+    try:
+        pd.to_numeric(s)
+        return "float"
+    except Exception:
+        pass
+    try:
+        pd.to_datetime(s, errors="raise")
+        return "datetime"
+    except Exception:
+        return "string"
 
-        if schema_file:
-            tmp_schema = tempfile.NamedTemporaryFile(delete=False)
-            tmp_schema.write(schema_file.read())
-            tmp_schema.close()
 
-        if rules_file:
-            tmp_rules = tempfile.NamedTemporaryFile(delete=False)
-            tmp_rules.write(rules_file.read())
-            tmp_rules.close()
+# ============================================================
+# Operators
+# ============================================================
 
-        engine = Engine(
-            schema=tmp_schema.name if tmp_schema else None,
-            rules=tmp_rules.name if tmp_rules else None
+OPERATORS: Dict[str, Callable[..., Any]] = {}
+
+def register_operator(name, fn):
+    OPERATORS[name] = fn
+
+
+register_operator(">", lambda s, v: s > v)
+register_operator("<", lambda s, v: s < v)
+register_operator(">=", lambda s, v: s >= v)
+register_operator("<=", lambda s, v: s <= v)
+register_operator("==", lambda s, v: s == v)
+register_operator("!=", lambda s, v: s != v)
+register_operator("contains", lambda s, v: s.astype(str).str.contains(v, na=False))
+register_operator("regex", lambda s, v: s.astype(str).str.match(v, na=False))
+register_operator("between", lambda s, v: s.between(v[0], v[1]))
+register_operator("is_null", lambda s, v: s.isna())
+register_operator("not_null", lambda s, v: s.notna())
+
+
+# ============================================================
+# Schema
+# ============================================================
+
+class Schema:
+    def __init__(self, cfg):
+        self.separator = cfg.get("separator", ",")
+        self.columns = cfg.get("columns")
+        self.types = cfg.get("types", {})
+        self.drop = set(cfg.get("drop", []))
+        self.chunk_size = int(cfg.get("chunk_size", 50000))
+        self.output = cfg.get("output", "csv")
+
+
+# ============================================================
+# Rules
+# ============================================================
+
+class Rule:
+    def __init__(
+        self,
+        field=None,
+        operator=None,
+        value=None,
+        expr=None,
+        severity="error",
+        name=None,
+    ):
+        self.field = field
+        self.operator = operator
+        self.value = value
+        self.expr = expr
+        self.severity = severity
+        self.name = name or field or expr
+
+    def apply(self, df):
+        if self.expr:
+            return df.eval(self.expr)
+        return OPERATORS[self.operator](df[self.field], self.value)
+
+
+class RuleEngine:
+    def __init__(self, rules):
+        self.rules = [Rule(**r) for r in rules]
+
+    def validate(self, columns):
+        for r in self.rules:
+            if r.field and r.field not in columns:
+                raise ValueError(r.field)
+
+    def evaluate(self, df):
+        err = pd.Series(False, index=df.index)
+        warn = pd.Series(False, index=df.index)
+        reason = pd.Series("", index=df.index)
+
+        for r in self.rules:
+            m = r.apply(df)
+            if r.severity == "error":
+                err |= m
+            else:
+                warn |= m
+            reason[m] += f"{r.name};"
+
+        return err, warn, reason
+
+
+# ============================================================
+# Approx Distinct (HyperLogLog Lite)
+# ============================================================
+
+class HLL:
+    def __init__(self, buckets=256):
+        self.buckets = buckets
+        self.reg = [0] * buckets
+
+    def add(self, v):
+        h = hash(v)
+        b = h & (self.buckets - 1)
+        w = h >> 8
+        rank = len(bin(w)) - len(bin(w).rstrip("0"))
+        self.reg[b] = max(self.reg[b], rank)
+
+    def count(self):
+        return int(self.buckets / sum(2 ** -r for r in self.reg))
+
+
+# ============================================================
+# Running Stats
+# ============================================================
+
+class RunningStats:
+    def __init__(self):
+        self.n = 0
+        self.mean = 0.0
+        self.M2 = 0.0
+        self.min = None
+        self.max = None
+
+    def update(self, x):
+        for v in x.dropna():
+            self.n += 1
+            d = v - self.mean
+            self.mean += d / self.n
+            self.M2 += d * (v - self.mean)
+            self.min = v if self.min is None else min(self.min, v)
+            self.max = v if self.max is None else max(self.max, v)
+
+    def std(self):
+        return (self.M2 / (self.n - 1)) ** 0.5 if self.n > 1 else 0.0
+
+
+# ============================================================
+# Stats Detector
+# ============================================================
+
+class StatsDetector:
+    def __init__(self, z=3.5):
+        self.z = z
+
+    def detect(self, df):
+        mask = pd.Series(False, index=df.index)
+        reason = pd.Series("", index=df.index)
+
+        for c in df.columns:
+            if not pd.api.types.is_numeric_dtype(df[c]):
+                continue
+
+            med = df[c].median()
+            mad = np.median(np.abs(df[c] - med))
+
+            if mad > 0:
+                z = 0.6745 * (df[c] - med) / mad
+            else:
+                std = df[c].std()
+                if std == 0 or np.isnan(std):
+                    continue
+                z = (df[c] - df[c].mean()) / std
+
+            m = np.abs(z) > self.z
+            mask |= m
+            reason[m] += f"stat_{c};"
+
+        return mask, reason
+
+
+# ============================================================
+# Profiler
+# ============================================================
+
+class Profiler:
+    def __init__(self):
+        self.stats = {}
+
+    def update(self, df):
+        for c in df.columns:
+            st = self.stats.setdefault(
+                c,
+                {
+                    "rows": 0,
+                    "nulls": 0,
+                    "unique": HLL(),
+                    "numeric": RunningStats(),
+                    "top": {},
+                },
+            )
+            s = df[c]
+            st["rows"] += len(s)
+            st["nulls"] += int(s.isna().sum())
+
+            for v in s.dropna():
+                st["unique"].add(v)
+
+            if pd.api.types.is_numeric_dtype(s):
+                st["numeric"].update(s)
+
+            st["top"] = s.value_counts().head(5).to_dict()
+
+    def export(self):
+        out = {}
+        for c, st in self.stats.items():
+            o = {
+                "rows": st["rows"],
+                "nulls": st["nulls"],
+                "unique_estimate": st["unique"].count(),
+                "top": st["top"],
+            }
+            rs = st["numeric"]
+            if rs.n > 0:
+                o.update(
+                    {
+                        "min": rs.min,
+                        "max": rs.max,
+                        "mean": rs.mean,
+                        "std": rs.std(),
+                    }
+                )
+            out[c] = o
+        return out
+
+
+# ============================================================
+# Writer
+# ============================================================
+
+class Writer:
+    def __init__(self, base, mode):
+        self.base = base
+        self.mode = mode
+        self.i = 0
+        os.makedirs(base + "_clean", exist_ok=True)
+        os.makedirs(base + "_anomalies", exist_ok=True)
+
+    def write(self, good, bad):
+        if self.mode == "parquet":
+            good.to_parquet(f"{self.base}_clean/{self.i}.parquet")
+            bad.to_parquet(f"{self.base}_anomalies/{self.i}.parquet")
+        elif self.mode == "json":
+            good.to_json(
+                f"{self.base}_clean/{self.i}.jsonl",
+                orient="records",
+                lines=True,
+            )
+            bad.to_json(
+                f"{self.base}_anomalies/{self.i}.jsonl",
+                orient="records",
+                lines=True,
+            )
+        else:
+            good.to_csv(f"{self.base}_clean/{self.i}.csv", index=False)
+            bad.to_csv(f"{self.base}_anomalies/{self.i}.csv", index=False)
+        self.i += 1
+
+
+# ============================================================
+# Engine
+# ============================================================
+
+class Engine:
+    def __init__(self, schema=None, rules=None):
+        self.schema = Schema(json.load(open(schema))) if schema else None
+        self.rules = RuleEngine(json.load(open(rules))) if rules else RuleEngine([])
+        self.stats = StatsDetector()
+        self.profiler = Profiler()
+        self.samples = []
+
+    def auto_schema(self, path):
+        with open_file(path) as f:
+            s = pd.read_csv(f, nrows=200)
+        return Schema(
+            {
+                "columns": list(s.columns),
+                "types": {c: infer_type(s[c]) for c in s.columns},
+            }
         )
 
-        report = engine.run(tmp_data.name)
+    def cast(self, df):
+        for c, t in self.schema.types.items():
+            if t == "int":
+                df[c] = pd.to_numeric(df[c], errors="coerce", downcast="integer")
+            elif t == "float":
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+            elif t == "datetime":
+                df[c] = pd.to_datetime(df[c], errors="coerce")
+        return df
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total rows", report["rows_total"])
-    c2.metric("Clean rows", report["rows_clean"])
-    c3.metric("Anomalies", report["rows_anomalies"])
-    c4.metric("Rows/sec", report["rows_per_sec"])
+    def run(self, path):
+        if not self.schema:
+            self.schema = self.auto_schema(path)
 
-    st.subheader("Sample anomalies")
-    if report["sample_anomalies"]:
-        st.dataframe(pd.DataFrame(report["sample_anomalies"]))
-    else:
-        st.write("No anomalies")
+        self.rules.validate(self.schema.columns)
+        writer = Writer(os.path.splitext(path)[0], self.schema.output)
 
-    st.subheader("Data profile")
-    profile_df = (
-        pd.DataFrame(report["profile"])
-        .T
-        .reset_index()
-        .rename(columns={"index": "column"})
-    )
-    st.dataframe(profile_df)
+        reader = pd.read_csv(
+            open_file(path),
+            sep=self.schema.separator,
+            chunksize=self.schema.chunk_size,
+            header=0,
+            dtype=str,
+        )
 
-    st.subheader("Numeric statistics")
-    numeric_cols = [
-        c for c in profile_df.columns
-        if c in ["min", "max", "mean", "std"]
-    ]
-    if numeric_cols:
-        st.dataframe(profile_df[["column"] + numeric_cols])
+        total = clean = bad = 0
+        t0 = time.time()
 
-    st.subheader("Download summary")
-    st.download_button(
-        "Download summary JSON",
-        json.dumps(report, indent=2),
-        file_name="summary.json",
-        mime="application/json"
-    )
+        for chunk in reader:
+            chunk = chunk.drop(columns=self.schema.drop, errors="ignore")
+            chunk = self.cast(chunk)
+
+            em, _, rr = self.rules.evaluate(chunk)
+            sm, sr = self.stats.detect(chunk)
+
+            mask = em | sm
+            chunk["__error_reason"] = rr + sr
+
+            good = chunk[~mask]
+            bad_rows = chunk[mask]
+
+            if len(self.samples) < 100:
+                self.samples.extend(
+                    bad_rows.head(100 - len(self.samples)).to_dict("records")
+                )
+
+            writer.write(good, bad_rows)
+            self.profiler.update(chunk.drop(columns="__error_reason"))
+
+            total += len(chunk)
+            clean += len(good)
+            bad += len(bad_rows)
+
+        report = {
+            "input": path,
+            "hash": sha256_file(path),
+            "finished": datetime.utcnow().isoformat(),
+            "rows_total": total,
+            "rows_clean": clean,
+            "rows_anomalies": bad,
+            "rows_per_sec": int(total / max(time.time() - t0, 1e-6)),
+            "profile": self.profiler.export(),
+            "sample_anomalies": self.samples,
+        }
+
+        with open(os.path.splitext(path)[0] + "_summary.json", "w") as f:
+            json.dump(report, f, indent=2)
+
+        return report
+
+
+# ============================================================
+# CLI
+# ============================================================
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--input", required=True)
+    p.add_argument("--schema")
+    p.add_argument("--rules")
+    args = p.parse_args()
+
+    e = Engine(args.schema, args.rules)
+    r = e.run(args.input)
+    print(json.dumps(r, indent=2))
+
+
+if __name__ == "__main__":
+    main()
