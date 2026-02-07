@@ -271,7 +271,7 @@ class Profiler:
                         "std": rs.std(),
                     }
                 )
-            out[c] = o
+            out[str(c)] = o
         return out
 
 
